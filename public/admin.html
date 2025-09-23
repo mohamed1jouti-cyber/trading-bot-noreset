@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>trading bot</title><link rel="stylesheet" href="styles.css"></head><body>
+<div class="wrap">
+  <header><h1>trading bot - admin</h1><div><button id="admin-logout">Logout</button></div></header>
+  <section class="card">
+    <h3>Users</h3>
+    <table id="users-table"><thead><tr><th>Username</th><th>Email</th><th>EUR</th><th>BTC</th><th>ETH</th><th>USDT</th><th>Banned</th><th>Actions</th></tr></thead><tbody></tbody></table>
+    <button id="export-all">Export All CSV</button>
+  </section>
+  <section class="card">
+    <h3>Chat</h3>
+    <div id="admin-userlist"></div>
+    <h4 id="chat-with">Select user</h4>
+    <div id="admin-chat-history" class="log"></div>
+    <input id="admin-chat-input">
+    <button id="admin-chat-send">Send</button>
+  </section>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body></html>
