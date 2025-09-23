@@ -28,6 +28,7 @@ const memory = {
   chats: new Map(), // username -> [ { from, text, time } ]
   emailTokens: new Map(), // username -> token
   transactions: [], // { username, type, pair, amount, currency, value_eur, created_at }
+  botConfigs: new Map(), // username -> { enabled, pair, allocateEUR, thresholdPct, lookback, cooldownMs, lastActionAt }
 };
 
 
@@ -96,6 +97,15 @@ function stepMarket(){
 }
 setInterval(stepMarket, 1000);
 function currentPrices(){ const out={}; for(const p in priceSeries) out[p]=priceSeries[p][priceSeries[p].length-1]; return out; }
+
+function recentChangePct(pair, lookback){
+  const series = priceSeries[pair] || [];
+  if(series.length < lookback+1) return 0;
+  const a = series[series.length-1];
+  const b = series[series.length-1-lookback];
+  if(!b) return 0;
+  return (a - b) / b;
+}
 
 // Helpers
 function authMiddleware(req,res,next){
@@ -221,6 +231,30 @@ app.get('/api/transactions/export', authMiddleware, async (req,res)=>{
 app.get('/api/prices', (req,res)=> res.json(currentPrices()));
 
 
+// Bot trading endpoints (vanilla in-memory)
+app.get('/api/bot/status', authMiddleware, (req,res)=>{
+  const cfg = memory.botConfigs.get(req.user.username) || null;
+  res.json({ enabled: !!(cfg && cfg.enabled), config: cfg });
+});
+
+app.post('/api/bot/config', authMiddleware, (req,res)=>{
+  const { pair = 'BTC/EUR', allocateEUR = 0, thresholdPct = 0.01, lookback = 5, cooldownMs = 10000 } = req.body || {};
+  const u = memory.users.get(req.user.username);
+  if(!u) return res.status(404).json({ error:'user not found' });
+  if(!PAIRS[pair]) return res.status(400).json({ error:'pair not supported' });
+  if(allocateEUR < 0) return res.status(400).json({ error:'allocateEUR must be >= 0' });
+  const cfg = { enabled:true, pair, allocateEUR:Number(allocateEUR), thresholdPct:Number(thresholdPct), lookback:Math.max(1, Number(lookback)|0), cooldownMs:Math.max(1000, Number(cooldownMs)|0), lastActionAt:0 };
+  memory.botConfigs.set(req.user.username, cfg);
+  res.json({ ok:true, config: cfg });
+});
+
+app.post('/api/bot/disable', authMiddleware, (req,res)=>{
+  const cfg = memory.botConfigs.get(req.user.username);
+  if(cfg) cfg.enabled = false;
+  res.json({ ok:true });
+});
+
+
 
 
 // Withdraw request endpoint - simplified (no withdrawCode in vanilla mode)
@@ -333,3 +367,45 @@ app.get('/', (req,res) => res.sendFile(path.join(__dirname, 'public', 'index.htm
 app.get('*', (req,res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 server.listen(PORT, ()=> console.log('Persistent trading bot server started on', PORT));
+
+// Simple bot loop executing periodically
+setInterval(()=>{
+  const now = Date.now();
+  for(const [username, cfg] of memory.botConfigs.entries()){
+    if(!cfg || !cfg.enabled) continue;
+    if(now - (cfg.lastActionAt||0) < cfg.cooldownMs) continue;
+    const user = memory.users.get(username);
+    if(!user || user.banned) continue;
+    const balances = user.balances || { EUR:0 };
+    const pair = cfg.pair;
+    const symbol = PAIRS[pair].symbol;
+    const price = currentPrices()[pair];
+    const change = recentChangePct(pair, cfg.lookback);
+    // Buy if uptrend over threshold, sell if downtrend below -threshold
+    if(change >= cfg.thresholdPct && (balances.EUR||0) > 0){
+      const eurToUse = Math.min(cfg.allocateEUR, balances.EUR||0);
+      if(eurToUse > 0 && price > 0){
+        const amountBase = eurToUse / price;
+        balances.EUR = (balances.EUR||0) - eurToUse;
+        balances[symbol] = (balances[symbol]||0) + amountBase;
+        user.balances = balances;
+        memory.transactions.push({ username, type:'bot-buy', pair, amount:amountBase, currency:symbol, value_eur:eurToUse, created_at:new Date() });
+        cfg.lastActionAt = now;
+        io.to(username).emit('trade_result', { ok:true, balances, bot:true });
+        io.to('admins').emit('user_update', { username, balances });
+      }
+    } else if(change <= -cfg.thresholdPct && (balances[symbol]||0) > 0){
+      const baseToSell = Math.min((cfg.allocateEUR/price)||0, balances[symbol]||0);
+      if(baseToSell > 0){
+        const eurProceeds = baseToSell * price;
+        balances[symbol] = (balances[symbol]||0) - baseToSell;
+        balances.EUR = (balances.EUR||0) + eurProceeds;
+        user.balances = balances;
+        memory.transactions.push({ username, type:'bot-sell', pair, amount:baseToSell, currency:symbol, value_eur:eurProceeds, created_at:new Date() });
+        cfg.lastActionAt = now;
+        io.to(username).emit('trade_result', { ok:true, balances, bot:true });
+        io.to('admins').emit('user_update', { username, balances });
+      }
+    }
+  }
+}, 2000);
