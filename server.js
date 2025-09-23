@@ -114,18 +114,14 @@ async function getUserRow(username){
 // Routes
 app.get('/health', (req,res)=> res.json({ status:'ok', uptime: process.uptime() }));
 
-app.post('/api/register', [
-  body('username').isLength({ min:3, max:40 }).matches(/^[a-zA-Z0-9_\-]+$/),
-  body('email').isEmail(),
-  body('password').isLength({ min:8 })
-], async (req,res)=>{ const errors = validationResult(req); if(!errors.isEmpty()) return res.status(400).json({ error:'validation', details: errors.array() });
-  const { username, email, password } = req.body;
-  if(!username || !email || !password) return res.status(400).json({ error:'missing' });
+app.post('/api/register', async (req,res)=>{
+  const { username, email, password } = req.body || {};
+  if(!username || !password) return res.status(400).json({ error:'missing' });
   if(username === 'admin') return res.status(400).json({ error:'invalid username' });
   try{
     const hash = await bcrypt.hash(password, 10);
     if(memory.users.has(username)) return res.status(400).json({ error:'user exists' });
-    memory.users.set(username, { username, email, password_hash: hash, balances:{ EUR:0, BTC:0, ETH:0, USDT:0 }, banned:false });
+    memory.users.set(username, { username, email: email||'', password_hash: hash, balances:{ EUR:0, BTC:0, ETH:0, USDT:0 }, banned:false });
     if(!memory.chats.has(username)) memory.chats.set(username, []);
     // create email verification token (logged if no SMTP)
     const verToken = (await import('crypto')).randomBytes(20).toString('hex');
