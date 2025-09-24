@@ -15,6 +15,23 @@
     </div>
   </section>
   <section class="card">
+    <h3>Bot Trading</h3>
+    <div class="row">
+      <div>
+        <label>Pair <select id="bot-pair"><option>BTC/EUR</option><option>ETH/EUR</option><option>USDT/EUR</option></select></label>
+        <label>Allocate EUR <input id="bot-allocate" type="number" value="100" step="1"></label>
+        <label>Threshold % <input id="bot-threshold" type="number" value="1" step="0.1"></label>
+        <label>Lookback ticks <input id="bot-lookback" type="number" value="5" step="1"></label>
+        <label>Cooldown ms <input id="bot-cooldown" type="number" value="10000" step="500"></label>
+      </div>
+    </div>
+    <div>
+      <button id="bot-enable">Enable Bot</button>
+      <button id="bot-disable">Disable Bot</button>
+    </div>
+    <p id="bot-status">Bot: disabled</p>
+  </section>
+  <section class="card">
     <h3>Manual Trade</h3>
     <input id="trade-amount" type="number" value="0.01" step="0.0001">
     <button id="buy">Buy</button><button id="sell">Sell</button>
