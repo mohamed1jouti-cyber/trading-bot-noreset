@@ -13,6 +13,8 @@ import nodemailer from 'nodemailer';
 import { stringify } from 'csv-stringify';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import fsp from 'fs/promises';
 
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -31,6 +33,49 @@ const memory = {
   botConfigs: new Map(), // username -> { enabled, pair, allocateEUR, thresholdPct, lookback, cooldownMs, lastActionAt }
 };
 
+// Simple JSON persistence (best-effort; not durable like a database)
+const DATA_DIR = path.join(__dirname, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'state.json');
+function serializeMemory(){
+  return {
+    users: Array.from(memory.users.entries()),
+    chats: Array.from(memory.chats.entries()),
+    emailTokens: Array.from(memory.emailTokens.entries()),
+    transactions: memory.transactions,
+    botConfigs: Array.from(memory.botConfigs.entries()),
+  };
+}
+function deserializeMemory(obj){
+  try{
+    memory.users = new Map(obj.users||[]);
+    memory.chats = new Map(obj.chats||[]);
+    memory.emailTokens = new Map(obj.emailTokens||[]);
+    memory.transactions = Array.isArray(obj.transactions)? obj.transactions : [];
+    memory.botConfigs = new Map(obj.botConfigs||[]);
+  }catch(e){ console.error('deserialize error', e); }
+}
+async function loadState(){
+  try{
+    if(!fs.existsSync(DATA_FILE)) return;
+    const raw = await fsp.readFile(DATA_FILE,'utf-8');
+    const obj = JSON.parse(raw);
+    deserializeMemory(obj);
+    console.log('✅ State loaded from', DATA_FILE);
+  }catch(e){ console.error('loadState error', e); }
+}
+let saveTimer = null;
+async function saveState(){
+  try{
+    if(!fs.existsSync(DATA_DIR)) await fsp.mkdir(DATA_DIR, { recursive:true });
+    const data = JSON.stringify(serializeMemory());
+    await fsp.writeFile(DATA_FILE, data, 'utf-8');
+  }catch(e){ console.error('saveState error', e); }
+}
+function saveSoon(){
+  if(saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 500);
+}
+
 
 // Ensure admin exists in users table (admin credentials come from ADMIN_PASS env)
 async function ensureAdminUser(){
@@ -38,10 +83,12 @@ async function ensureAdminUser(){
   if(!existing){
     memory.users.set('admin', { username:'admin', email:'admin@localhost', password_hash: await bcrypt.hash(ADMIN_PASS, 12), balances:{ EUR:0, BTC:0, ETH:0, USDT:0 }, banned:false });
     memory.chats.set('admin', []);
+    saveSoon();
   }
   console.log('✅ Admin user ensured (in-memory)');
 }
 
+await loadState();
 ensureAdminUser().catch(e=>{ console.error('admin init failed', e); process.exit(1); });
 
 
@@ -137,6 +184,7 @@ app.post('/api/register', async (req,res)=>{
     // create email verification token (logged if no SMTP)
     const verToken = (await import('crypto')).randomBytes(20).toString('hex');
     memory.emailTokens.set(username, verToken);
+    saveSoon();
     // send email if transporter configured, otherwise log verification link
     const verifyLink = (process.env.BASE_URL || '') + '/verify-email?username=' + encodeURIComponent(username) + '&token=' + verToken;
     if(transporter){
@@ -188,11 +236,13 @@ app.post('/api/admin/set-balance', authMiddleware, async (req,res)=>{
   balances[currency] = amount;
   user.balances = balances;
   memory.transactions.push({ username, type:'admin-adjust', pair:null, amount, currency, value_eur:null, created_at:new Date(), note:'admin set balance' });
+  saveSoon();
   // notify via sockets and append chat
   io.to(username).emit('balance_updated', { username, balances });
   let msgs = memory.chats.get(username) || [];
   msgs.push({ from:'admin', text:`Your ${currency} balance set to ${amount}`, time: new Date() });
   memory.chats.set(username, msgs);
+  saveSoon();
   io.to(username).emit('chat_message', { user: username, from:'admin', text:`Your ${currency} balance set to ${amount}`, time: new Date() });
   res.json({ ok:true });
 });
@@ -203,7 +253,7 @@ app.post('/api/admin/ban', authMiddleware, async (req,res)=>{
   const { username, ban } = req.body;
   if(!username || typeof ban !== 'boolean') return res.status(400).json({ error:'missing' });
   const user = memory.users.get(username);
-  if(user){ user.banned = ban; }
+  if(user){ user.banned = ban; saveSoon(); }
   io.to(username).emit('banned', { banned: ban, message: ban ? 'You have been banned by admin.' : 'You have been unbanned.' });
   res.json({ ok:true });
 });
@@ -246,12 +296,13 @@ app.post('/api/bot/config', authMiddleware, (req,res)=>{
   if(allocateEUR < 0) return res.status(400).json({ error:'allocateEUR must be >= 0' });
   const cfg = { enabled:true, pair, allocateEUR:Number(allocateEUR), thresholdPct:Number(thresholdPct), lookback:Math.max(1, Number(lookback)|0), cooldownMs:Math.max(1000, Number(cooldownMs)|0), lastActionAt:0 };
   memory.botConfigs.set(req.user.username, cfg);
+  saveSoon();
   res.json({ ok:true, config: cfg });
 });
 
 app.post('/api/bot/disable', authMiddleware, (req,res)=>{
   const cfg = memory.botConfigs.get(req.user.username);
-  if(cfg) cfg.enabled = false;
+  if(cfg) { cfg.enabled = false; saveSoon(); }
   res.json({ ok:true });
 });
 
@@ -274,6 +325,7 @@ app.post('/api/withdraw', authMiddleware, async (req,res)=>{
     const msgs = memory.chats.get(req.user.username) || [];
     msgs.push(msg);
     memory.chats.set(req.user.username, msgs);
+    saveSoon();
     io.to('admins').emit('chat_message', { user: req.user.username, from: req.user.username, text: msg.text, time: msg.time });
     res.json({ success:true, message:'Withdrawal request sent to admin' });
   }catch(e){ console.error('withdraw err', e); res.status(500).json({ error:'server error' }); }
@@ -288,6 +340,7 @@ app.get('/verify-email', async (req,res)=>{
   const saved = memory.emailTokens.get(username);
   if(!saved || saved !== token) return res.status(400).send('invalid or expired token');
   memory.emailTokens.delete(username);
+  saveSoon();
   res.send('Email verified for ' + username + '. You can now use the app.');
 });
 
@@ -319,6 +372,7 @@ io.on('connection', socket => {
       let msgs = memory.chats.get(username) || [];
       msgs.push({ from: username, text, time: new Date() });
       memory.chats.set(username, msgs);
+      saveSoon();
       // notify admin and user
       io.to('admins').emit('chat_message', { user: username, from: username, text, time: new Date() });
       io.to(username).emit('chat_message', { user: username, from: username, text, time: new Date() });
@@ -354,6 +408,7 @@ io.on('connection', socket => {
         balances[sym] = (balances[sym]||0) + Number(amountBase);
         u.balances = balances;
         memory.transactions.push({ username, type:'buy', pair, amount:amountBase, currency:sym, value_eur:cost, created_at:new Date() });
+        saveSoon();
       } else {
         if((balances[sym]||0) < Number(amountBase)) return socket.emit('trade_result', { ok:false, reason:'insufficient asset' });
         balances[sym] = (balances[sym]||0) - Number(amountBase);
@@ -361,6 +416,7 @@ io.on('connection', socket => {
         balances.EUR = (balances.EUR||0) + proceeds;
         u.balances = balances;
         memory.transactions.push({ username, type:'sell', pair, amount:amountBase, currency:sym, value_eur:proceeds, created_at:new Date() });
+        saveSoon();
       }
       io.to(username).emit('trade_result', { ok:true, balances });
       io.to('admins').emit('user_update', { username, balances });
@@ -398,6 +454,7 @@ setInterval(()=>{
         balances[symbol] = (balances[symbol]||0) + amountBase;
         user.balances = balances;
         memory.transactions.push({ username, type:'bot-buy', pair, amount:amountBase, currency:symbol, value_eur:eurToUse, created_at:new Date() });
+        saveSoon();
         cfg.lastActionAt = now;
         io.to(username).emit('trade_result', { ok:true, balances, bot:true });
         io.to('admins').emit('user_update', { username, balances });
@@ -410,6 +467,7 @@ setInterval(()=>{
         balances.EUR = (balances.EUR||0) + eurProceeds;
         user.balances = balances;
         memory.transactions.push({ username, type:'bot-sell', pair, amount:baseToSell, currency:symbol, value_eur:eurProceeds, created_at:new Date() });
+        saveSoon();
         cfg.lastActionAt = now;
         io.to(username).emit('trade_result', { ok:true, balances, bot:true });
         io.to('admins').emit('user_update', { username, balances });
