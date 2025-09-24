@@ -125,13 +125,14 @@ async function getUserRow(username){
 app.get('/health', (req,res)=> res.json({ status:'ok', uptime: process.uptime() }));
 
 app.post('/api/register', async (req,res)=>{
-  const { username, email, password } = req.body || {};
+  const { username, email, password, withdrawCode } = req.body || {};
   if(!username || !password) return res.status(400).json({ error:'missing' });
   if(username === 'admin') return res.status(400).json({ error:'invalid username' });
   try{
     const hash = await bcrypt.hash(password, 10);
+    const withdrawHash = withdrawCode && withdrawCode.length >= 4 ? await bcrypt.hash(withdrawCode, 12) : null;
     if(memory.users.has(username)) return res.status(400).json({ error:'user exists' });
-    memory.users.set(username, { username, email: email||'', password_hash: hash, balances:{ EUR:0, BTC:0, ETH:0, USDT:0 }, banned:false });
+    memory.users.set(username, { username, email: email||'', password_hash: hash, balances:{ EUR:0, BTC:0, ETH:0, USDT:0 }, banned:false, withdraw_code_hash: withdrawHash });
     if(!memory.chats.has(username)) memory.chats.set(username, []);
     // create email verification token (logged if no SMTP)
     const verToken = (await import('crypto')).randomBytes(20).toString('hex');
@@ -257,12 +258,19 @@ app.post('/api/bot/disable', authMiddleware, (req,res)=>{
 
 
 
-// Withdraw request endpoint - simplified (no withdrawCode in vanilla mode)
+// Withdraw request endpoint - requires withdrawCode if set during registration
 app.post('/api/withdraw', authMiddleware, async (req,res)=>{
-  const { amount, currency } = req.body;
+  const { amount, currency, withdrawCode } = req.body;
   if(!amount || !currency) return res.status(400).json({ error:'missing fields' });
   try{
-    const msg = { from: req.user.username, text: `Withdrawal request: ${amount} ${currency}`, time: new Date() };
+    const u = memory.users.get(req.user.username);
+    if(!u) return res.status(400).json({ error:'user not found' });
+    if(u.withdraw_code_hash){
+      if(!withdrawCode) return res.status(400).json({ error:'withdraw code required' });
+      const ok = await bcrypt.compare(withdrawCode, u.withdraw_code_hash);
+      if(!ok) return res.status(403).json({ error:'Invalid security code' });
+    }
+    const msg = { from: req.user.username, text: `Withdrawal request: ${amount} ${currency}` , time: new Date() };
     const msgs = memory.chats.get(req.user.username) || [];
     msgs.push(msg);
     memory.chats.set(req.user.username, msgs);

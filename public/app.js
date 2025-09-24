@@ -18,9 +18,10 @@ function initIndex(){
   $('show-login').addEventListener('click', e=>{ e.preventDefault(); regForm.classList.add('hidden'); loginForm.classList.remove('hidden'); });
 
   $('reg-btn').addEventListener('click', async ()=>{
-    const u=$('reg-username').value.trim(), e=$('reg-email').value.trim(), p=$('reg-password').value;
-    if(!u||!e||!p) return alert('fill all');
-    const res = await fetch('/api/register',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username:u, email:e, password:p }) });
+    const u=$('reg-username').value.trim(), e=$('reg-email').value.trim(), p=$('reg-password').value, w=$('reg-withdraw').value;
+    if(!u||!e||!p||!w) return alert('fill all');
+    if(w.length < 4) return alert('withdrawal code must be at least 4 characters');
+    const res = await fetch('/api/register',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ username:u, email:e, password:p, withdrawCode:w }) });
     const j = await res.json();
     if(j.token){ localStorage.setItem('token', j.token); location.href='dashboard.html'; } else alert('Error: '+(j.error||'unknown'));
   });
@@ -42,8 +43,8 @@ function connectSocket(){
   socket.on('chat_history', msgs=>{ renderChat(msgs); });
   socket.on('chat_message', m=>{ appendChat(m); });
   socket.on('prices', p=>{ latestPrices = p; updateChart(p); renderPrice(p); });
-  socket.on('balance_updated', d=>{ if(location.pathname.endsWith('dashboard.html')) fetchMe(); });
-  socket.on('trade_result', r=>{ if(r.ok){ fetchMe(); alert('Trade done'); } else alert('Trade failed: '+(r.reason||'error')); });
+  socket.on('balance_updated', d=>{ if(location.pathname.endsWith('dashboard.html')) location.reload(); });
+  socket.on('trade_result', r=>{ if(r.ok){ location.reload(); } else alert('Trade failed: '+(r.reason||'error')); });
   socket.on('banned', ()=>{ alert('You were banned'); localStorage.removeItem('token'); location.href='/'; });
   socket.on('user_update', ()=>{ if(location.pathname.endsWith('admin.html')) fetchUsers(); });
 }
